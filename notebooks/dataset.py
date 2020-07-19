@@ -264,21 +264,21 @@ class SunImageDataset(Dataset):
         Possible image types for HEI images
     sdo_types : list(str)
         Possible image types for SDO images, represented by wavelengths
-    transform : dict(torchvision.transforms), None
+    transform : torchvision.transforms, None
         Torchvision transforms, which are applied to the tensors before returning.
-        The transforms are stored in a dictionary, where each dictionary entry stores
-        the transformation to be applied to the image type which is stored as the key
+        The transforms should operate on a dictionary, where each dictionary entry stores
+        stores theh image type, a custom transform class would be helpful here
         If None, no transformation is applied
-    x_tensor : torch.tensor
-        Torch tensor which stores the input images as a [N, 1, W, H] tensor, where N, W, H
+    x_data : np.array
+        Numpy array which stores the input images as a [N, 1, W, H] tensor, where N, W, H
         represent the number of images, width, and height respectively
-    y_tensor : torch.tensor
-        Torch tensor which stores the output images as a [N, 1, W, H] tensor, where N, W, H
-        are described in x_tensor
+    y_data : np.array
+        Numpy array which stores the output images as a [N, 1, W, H] tensor, where N, W, H
+        are described in x_data
     x_type : str
-        The image type to be stored in the x_tensor
+        The image type to be stored in the x_data
     y_type : str
-        The image type to be stored in the y_tensor
+        The image type to be stored in the y_data
     
     '''
     
@@ -290,7 +290,103 @@ class SunImageDataset(Dataset):
     x_type = 'ew'
     y_type = '0304'
     
-    def __init__(self, transform=None, remake=False):
+    excluded_dates = ['2013-04-17-H18-M24',
+                      '2012-08-23-H21-M55',
+                      '2012-10-12-H19-M22',
+                      '2012-12-18-H19-M40',
+                      '2014-04-13-H17-M02',
+                      '2015-07-08-H18-M38',
+                      '2011-11-02-H18-M14',
+                      '2012-01-18-H18-M53',
+                      '2012-09-21-H22-M01',
+                      '2010-09-01-H16-M51',
+                      '2011-10-25-H17-M57',
+                      '2011-05-07-H18-M48',
+                      '2011-12-24-H18-M24',
+                      '2011-10-16-H17-M08',
+                      '2011-10-18-H17-M10',
+                      '2012-11-18-H21-M37',
+                      '2011-11-14-H20-M21',
+                      '2012-08-23-H22-M08',
+                      '2012-07-16-H21-M00',
+                      '2012-10-12-H20-M01',
+                      '2010-08-21-H22-M09',
+                      '2011-03-15-H17-M28',
+                      '2011-09-25-H18-M38',
+                      '2011-01-27-H19-M51',
+                      '2013-01-02-H19-M27',
+                      '2013-03-26-H22-M25',
+                      '2012-11-16-H20-M36',
+                      '2011-03-18-H18-M22',
+                      '2011-03-17-H19-M20',
+                      '2011-10-12-H21-M09',
+                      '2010-11-02-H17-M47',
+                      '2012-01-11-H20-M45',
+                      '2011-10-23-H19-M35',
+                      '2011-04-19-H16-M19',
+                      '2013-03-28-H16-M37',
+                      '2011-03-14-H16-M46',
+                      '2011-05-12-H16-M55',
+                      '2013-04-22-H16-M05',
+                      '2011-03-03-H18-M09',
+                      '2011-09-15-H18-M14',
+                      '2011-03-25-H19-M36',
+                      '2011-07-18-H18-M14',
+                      '2011-10-09-H17-M57',
+                      '2011-01-13-H18-M10',
+                      '2012-07-10-H17-M29',
+                      '2011-03-05-H15-M41',
+                      '2011-10-07-H18-M26',
+                      '2010-09-07-H18-M22',
+                      '2011-03-12-H16-M55',
+                      '2011-11-14-H20-M47',
+                      '2012-10-18-H20-M27',
+                      '2012-08-23-H21-M30',
+                      '2010-09-07-H17-M07',
+                      '2012-09-21-H19-M48',
+                      '2012-03-26-H17-M58',
+                      '2013-01-23-H20-M56',
+                      '2011-01-11-H17-M30',
+                      '2011-04-07-H17-M21',
+                      '2010-10-12-H17-M27',
+                      '2012-10-11-H16-M17',
+                      '2010-12-01-H17-M28',
+                      '2011-05-19-H17-M19',
+                      '2010-11-04-H18-M05',
+                      '2011-09-13-H20-M10',
+                      '2010-11-03-H19-M35',
+                      '2013-04-10-H19-M29',
+                      '2012-08-23-H21-M43',
+                      '2010-06-30-H18-M40',
+                      '2010-11-28-H18-M04',
+                      '2012-10-17-H17-M11',
+                      '2013-11-28-H18-M05',
+                      '2011-05-19-H17-M07',
+                      '2012-11-02-H19-M00',
+                      '2010-10-11-H16-M48',
+                      '2011-06-26-H18-M06',
+                      '2011-10-13-H17-M31',
+                      '2010-10-02-H18-M16',
+                      '2011-10-18-H17-M54',
+                      '2010-09-07-H15-M53']
+    
+    #Values from https://hesperia.gsfc.nasa.gov/ssw/sdo/aia/response/aia_V8_20171210_050627_response_table.txt
+    interpolation_values = {'2010-03-24T00:00:00.000': 0.10424,
+                           '2011-01-27T15:00:00.000': 0.06483,
+                           '2011-04-13T18:00:00.000': 0.05197,
+                           '2011-05-20T18:00:00.000': 0.04532,
+                           '2011-10-06T12:00:00.000': 0.03270,
+                           '2012-01-01T12:00:00.000': 0.02977,
+                           '2012-04-10T12:00:00.000': 0.03533,
+                           '2013-02-15T12:00:00.000': 0.03471,
+                           '2013-05-01T12:00:00.000': 0.03394,
+                           '2013-10-01T12:00:00.000': 0.02817,
+                           '2014-05-25T12:00:00.000': 0.02059,
+                           '2015-05-01T12:00:00.000': 0.01128,
+                           '2016-05-01T12:00:00.000': 0.00702}
+    
+    
+    def __init__(self, transform=None, remake=False, correct_sensor_data=True):
         '''
         Parameters
         ----------
@@ -303,9 +399,9 @@ class SunImageDataset(Dataset):
             time.
         '''
         self.transform = transform
-        self.x_tensor = None
-        self.y_tensor = None
-        self.get_all_images(remake=remake)
+        self.x_data = None
+        self.y_data = None
+        self.get_all_images(remake=remake, correct_sensor_data=correct_sensor_data)
         
     def set_transform(self, transform=None):
         '''Sets the transform of the class.
@@ -313,12 +409,18 @@ class SunImageDataset(Dataset):
         Parameters
         ----------
         
-        transform : dict(torchvision.transforms), None
-            Transform to be applied to the tensors before returning. Each dictionary entry
-            must indicate an image type to which the transformation will be applied. If None,
-            no transformation is applied
+        transform : torchvision.transforms, None
+            Transform to be applied to the tensors before returning. If None, no 
+            transformation is applied
         '''
         self.transform = transform
+        
+    def get_interpolation_value(self, date_timestamp):
+        start_dates = list(map(lambda x: pd.to_datetime(x[:-4], format='%Y-%m-%dT%H:%M:%S').timestamp(), self.interpolation_values.keys()))
+        eff_area = list(self.interpolation_values.values())
+        return np.interp(date_timestamp, start_dates, eff_area)
+            
+        
                   
                 
     def get_images(self, folder, allowed_types):
@@ -388,7 +490,7 @@ class SunImageDataset(Dataset):
         return images
     
     
-    def read_all_images(self, allowed_types=['ew', '0304'], new_size=[512, 512]):
+    def read_all_images(self, allowed_types=['ew', '0304'], new_size=(864, 864)):
         '''This function reads all entries in the processed folder. It stores
         the resulting images in a pandas dataframe which contains a column for
         each image type, along with the date of that entry, which can be thought
@@ -430,6 +532,7 @@ class SunImageDataset(Dataset):
                         data = data[pixel_remove_width:(height-pixel_remove_width), pixel_remove_width:(width-pixel_remove_width)]
                     image_dict[image.image_type] = resize(data, (new_size[0], new_size[1]))
                     image_dict[image.image_type] = image_dict[image.image_type].astype(dtype='float32')
+                    print(image_dict[image.image_type].shape)
                 image_series = pd.Series(image_dict)
                 df = df.append(image_series, ignore_index=True)
                 print('Dataframe shape: ' + str(df.shape) + '\tFolder: ' + str(i))
@@ -438,7 +541,7 @@ class SunImageDataset(Dataset):
             i += 1
         return df
     
-    def get_all_images(self, remake=False):
+    def get_all_images(self, remake=False, correct_sensor_data=True, size=(864, 864)):
         '''Loads all the image data as tensors. To speed up reading time, a copy of the
         tensor is saved to disk to facilitate loading the images again. If remake
         is True, then all images are read again rather than reading the tensor. This
@@ -455,27 +558,35 @@ class SunImageDataset(Dataset):
         '''
         save_location = pathlib.Path('../datasets')
         if save_location.exists() and not remake:
-            self.x_tensor = torch.load(save_location / 'x_images.pt')
-            self.y_tensor = torch.load(save_location / 'y_images.pt')
+            self.x_data = torch.load(save_location / 'x_images.pt')
+            self.y_data = torch.load(save_location / 'y_images.pt')
+            self.dates_data = torch.load(save_location / 'dates.pt')
         else:
-            df = self.read_all_images()
+            df = self.read_all_images(new_size=size)
             df = df.dropna()
-            self.x_tensor = torch.tensor(np.array(list(df[self.x_type].values), dtype=np.float32), dtype=torch.float32)
-            self.y_tensor = torch.tensor(np.array(list(df[self.y_type].values), dtype=np.float32), dtype=torch.float32)
-            torch.save(self.x_tensor, save_location / 'x_images.pt')
-            torch.save(self.y_tensor, save_location / 'y_images.pt')
+            df = df[~df['date'].isin(list(map(lambda x: pd.to_datetime(x, format="%Y-%m-%d-H%H-M%M"), self.excluded_dates)))]
+            self.x_data = np.array(list(df[self.x_type].values), dtype=np.float32)
+            self.y_data = np.array(list(df[self.y_type].values), dtype=np.float32)
+            self.dates_data = np.array(list(map(lambda x: x.astype('datetime64[s]').astype('int'), df['date'].values)))
+            torch.save(self.x_data, save_location / 'x_images.pt')
+            torch.save(self.y_data, save_location / 'y_images.pt')
+            torch.save(self.dates_data, save_location / 'dates.pt')
+        print(self.x_data.shape)
+        print(self.y_data.shape)
             
         to_keep = []
         for i in range(len(self)):
-            arr_x = np.array(self.x_tensor[i]).reshape((512, 512))
-            arr_y = np.array(self.y_tensor[i]).reshape((512, 512))
+            arr_x = self.x_data[i].reshape(size)
+            arr_y = self.y_data[i].reshape(size)
             if not np.isnan(arr_x.mean()) and not np.isnan(arr_y.mean()):
                 to_keep.append(i)
+                if correct_sensor_data:
+                    self.y_data[i] = self.y_data[i] * 1/self.get_interpolation_value(self.dates_data[i])
         
-        self.x_tensor = self.x_tensor[to_keep, :, :]
-        self.y_tensor = self.y_tensor[to_keep, :, :]
-        self.x_tensor = self.x_tensor[:, None, :, :]
-        self.y_tensor = self.y_tensor[:, None, :, :]
+        self.x_data = self.x_data[to_keep, :, :]
+        self.y_data = self.y_data[to_keep, :, :]
+        self.x_data = self.x_data[:, None, :, :]
+        self.y_data = self.y_data[:, None, :, :]
     
     def __len__(self):
         '''Returns the number of entries in the dataset, i.e., the number of data
@@ -487,7 +598,7 @@ class SunImageDataset(Dataset):
         len : int
             Number of data points
         '''
-        return list(self.x_tensor.shape)[0]
+        return list(self.x_data.shape)[0]
     
     def __getitem__(self, idx):
         '''Returns a slice of the tensors according to the input indices along the data point axis. 
@@ -512,10 +623,43 @@ class SunImageDataset(Dataset):
         if torch.is_tensor(idx):
             idx = idx.tolist()
             
-        sample = {self.x_type: self.x_tensor[idx], self.y_type: self.y_tensor[idx]}
+        sample = {self.x_type: self.x_data[idx], self.y_type: self.y_data[idx]}
         
         if self.transform is not None:
-            for key in sample.keys():
-                sample[key] = self.transform[key](sample[key])
+            sample = self.transform(sample)
                 
         return sample
+    
+    def get_date(self, idx):
+        
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+            
+        return self.dates_data[idx]
+    
+    def show_images_and_names(self):
+        
+        save_location = pathlib.Path('../datasets')
+        filename = 'df_data.pkl'
+        file_path = save_location / filename
+        if not file_path.exists():
+            df = self.read_all_images()
+            df = df.dropna()
+            df.to_pickle(file_path)
+        else:
+            df = pd.read_pickle(file_path)
+            
+        columns = 2
+        rows = 1
+        
+        for index, row in df.iterrows():
+            print('Image: ' + str(index) + ' Date: ' + str(row['date']))
+            in_img = row['ew']
+            out_img = row['0304']
+        
+            fig=plt.figure(figsize=(8, 8))
+            fig.add_subplot(rows, columns, 1)
+            plt.imshow(in_img.reshape(512, 512))
+            fig.add_subplot(rows, columns, 2)
+            plt.imshow(out_img.reshape(512, 512))
+            plt.show()

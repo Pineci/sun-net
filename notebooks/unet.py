@@ -51,9 +51,9 @@ class Horizontal(nn.Module):
             
             if not last_layer or l != self.length-1:
                 self.layers.append(nn.BatchNorm2d(out_channels))
-                self.layers.append(nn.ReLU(inplace=True))
+                self.layers.append(nn.ReLU())
                 if dropout is not None:
-                    self.layers.append(nn.Dropout2d(p=dropout, inplace=True))
+                    self.layers.append(nn.Dropout2d(p=dropout))
         
     def forward(self, x):
         '''
@@ -266,4 +266,4 @@ class UNet(nn.Module):
         x = self.out_horiz(x)
         return x
         
-        
+        #Receptive field is 21 pixels ??????
