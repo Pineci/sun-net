@@ -7,18 +7,43 @@ import numpy as np
 
 class PowerTransform(object):
     
-    def __init__(self, types, lambdas=[None, None], mins=[0, 0]):
+    def __init__(self, types, lambdas=[[None], [None]], mins=[[0], [0]]):
         self.x_type, self.y_type = types
         self.x_lambda, self.y_lambda = lambdas
         self.x_min, self.y_min = mins
+        self.eps = 1e-5
     
     def __call__(self, sample):
         x_data, y_data = sample[self.x_type], sample[self.y_type]
+        #print(x_data.shape)
+        #print(y_data.shape)
+        #print(self.x_min)
+        #print(self.y_min)
         
-        if self.x_lambda is not None:
-            x_data = boxcox(x_data-self.x_min+1, self.x_lambda)
-        if self.y_lambda is not None:
-            y_data = boxcox(y_data-self.y_min+1, self.y_lambda)
+        stack_axis = 1 if len(x_data.shape) == 4 else 0
+        
+        
+        
+        for i in range(x_data.shape[stack_axis]):
+            if self.x_lambda[i] is not None:
+                if stack_axis == 0:
+                    data = x_data[i, :, :]-self.x_min[i]+1
+                    data[data < self.eps] = 1
+                    x_data[i, :, :] = np.log(data)
+                else:
+                    data = x_data[:, i, :, :]-self.x_min[i]+1
+                    data[data < self.eps] = 1
+                    x_data[:, i, :, :] = np.log(data)
+        for i in range(y_data.shape[stack_axis]):
+            if self.y_lambda[i] is not None:
+                if stack_axis == 0:
+                    data = y_data[i, :, :]-self.y_min[i]+1
+                    data[data < self.eps] = 1
+                    y_data[i, :, :] = np.log(data)
+                else:
+                    data = y_data[:, i, :, :]-self.y_min[i]+1
+                    data[data < self.eps] = 1
+                    y_data[:, i, :, :] = np.log(data)
             
         return {self.x_type : x_data, self.y_type : y_data}
     
@@ -29,10 +54,16 @@ class InversePowerTransform(object):
         self.min_val = min_val
         
     def __call__(self, sample):
-        data = sample
-        if self.lambda_val is not None:
-            data =  inv_boxcox(sample, self.lambda_val) + self.min_val - 1
-        return data
+        stack_axis = 1 if len(sample.shape) == 4 else 0
+        
+        for i in range(sample.shape[stack_axis]):
+            if self.lambda_val[i] is not None:
+                if stack_axis == 0:
+                    sample[i, :, :] = np.exp(sample[i, :, :] + self.min_val[i] - 1)
+                else:
+                    sample[:, i, :, :] = np.exp(sample[:, i, :, :] + self.min_val[i] - 1)
+        
+        return sample
             
 class ToTensor(object):
     
@@ -85,9 +116,9 @@ class RandomCrop(object):
     def __call__(self, sample):
         x_data, y_data = sample[self.x_type], sample[self.y_type]
         
-        corner_x = np.randint(0, x_data.shape[0]-self.crop_size[0]+1, size=1)
-        corner_y = np.randint(0, x_data.shape[1]-self.crop_size[1]+1, size=1)
-        other_corner_x, other_corner_y = corner_x + crop_size[0], corner_y + crop_size[1]
+        corner_x = np.random.randint(0, x_data.shape[1]-self.crop_size[0]+1, size=1)[0]
+        corner_y = np.random.randint(0, x_data.shape[2]-self.crop_size[1]+1, size=1)[0]
+        other_corner_x, other_corner_y = corner_x + self.crop_size[0], corner_y + self.crop_size[1]
         
         return {self.x_type : x_data[:, corner_x:other_corner_x, corner_y:other_corner_y],
                 self.y_type : y_data[:, corner_x:other_corner_x, corner_y:other_corner_y]}
@@ -104,6 +135,12 @@ class Normalize(object):
     def __call__(self, sample):
         x_tensor, y_tensor = sample[self.x_type], sample[self.y_type]
         
+        #print('X Shape: ' + str(x_tensor.size()))
+        #print('X Shape: ' + str(y_tensor.size()))
+        #print('X Mean: ' + str(self.x_mean))
+        #print('Y Mean: ' + str(self.y_mean))
+        #print('X STD: ' + str(self.x_std))
+        #print('Y STD: ' + str(self.y_std))
         x_tensor = F.normalize(x_tensor, self.x_mean, self.x_std, self.inplace)
         y_tensor = F.normalize(y_tensor, self.y_mean, self.y_std, self.inplace)
             
@@ -116,11 +153,17 @@ class InverseNormalize(object):
         self.std = std
         
     def __call__(self, sample):
-        return sample * self.std + self.mean
+        stack_axis = 1 if len(sample.shape) == 4 else 0
+        
+        if stack_axis == 0:
+            return sample * self.std[:, None, None] + self.mean[:, None, None]
+        else:
+            return sample * self.std[None, :, None, None] + self.mean[None, :, None, None]
+        #return sample * self.std + self.mean
     
 class AddDistChannel(object):
     
-    def __init__(self, types, size=(512, 512), metric='euclidean'):
+    def __init__(self, types, size=(864, 864), metric='euclidean'):
         self.x_type, self.y_type = types
         self.img_size = size
         new_arr = []
@@ -145,7 +188,7 @@ class AddDistChannel(object):
     
 class AddLatitudeChannel(object):
     
-    def __init__(self, types, size=(512, 512)):
+    def __init__(self, types, size=(864, 864)):
         self.x_type, self.y_type = types
         self.img_size = size
         self.lat_img = np.zeros(self.img_size)
@@ -153,7 +196,7 @@ class AddLatitudeChannel(object):
             self.lat_img[i] = np.ones(self.img_size[1]) * (self.img_size[0] - i - 1)
         self.lat_img = self.lat_img - self.img_size[0] / 2
         self.lat_img = self.lat_img / np.max(self.lat_img)
-        self.lat_img = self.lat_img[None, :, :]
+        self.lat_img = np.abs(self.lat_img[None, :, :])
         
     def get_mean_std(self):
         mean = np.mean(self.lat_img)

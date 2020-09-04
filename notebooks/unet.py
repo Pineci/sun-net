@@ -212,7 +212,7 @@ class UNet(nn.Module):
     
     '''
     
-    def __init__(self, n_channels=1, dropout=None, bilinear=False):
+    def __init__(self, in_channels=1, out_channels=1, dropout=None, bilinear=False):
         '''
         Parameters
         ----------
@@ -227,7 +227,7 @@ class UNet(nn.Module):
         '''
         super().__init__()
         
-        self.in_horiz = Horizontal([n_channels, 64, 64], dropout=dropout)
+        self.in_horiz = Horizontal([in_channels, 64, 64], dropout=dropout)
         self.down_1 = Down([64, 128, 128], dropout=dropout)
         self.down_2 = Down([128, 256, 256], dropout=dropout)
         self.down_3 = Down([256, 512, 512], dropout=dropout)
@@ -236,7 +236,7 @@ class UNet(nn.Module):
         self.up_3 = Up([512, 256, 256], dropout=dropout, bilinear=bilinear)
         self.up_2 = Up([256, 128, 128], dropout=dropout, bilinear=bilinear)
         self.up_1 = Up([128, 64, 64], dropout=dropout, bilinear=bilinear)
-        self.out_horiz = Horizontal([64, 1, 1], dropout=dropout, last_layer=True)
+        self.out_horiz = Horizontal([64, out_channels, out_channels], dropout=dropout, last_layer=True)
         
     def forward(self, x):
         '''

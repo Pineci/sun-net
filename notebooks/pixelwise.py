@@ -4,10 +4,10 @@ import torch.nn.functional as F
 
 class Pixelwise(nn.Module):
     
-    def __init__(self, n_channels=1):
+    def __init__(self, in_channels=1, out_channels=1):
         super().__init__()
         
-        self.conv1_1 = nn.Conv2d(n_channels, 64, kernel_size=1, padding=0)
+        self.conv1_1 = nn.Conv2d(in_channels, 64, kernel_size=1, padding=0)
         self.bano1_1 = nn.BatchNorm2d(64)
         self.relu1_1 = nn.ReLU()
         
@@ -20,7 +20,7 @@ class Pixelwise(nn.Module):
         self.relu3_1 = nn.ReLU()
         
         self.last_1 = nn.Conv2d(256, 64, kernel_size=1, padding=0)
-        self.last_2 = nn.Conv2d(64, 1, kernel_size=1, padding=0)
+        self.last_2 = nn.Conv2d(64, out_channels, kernel_size=1, padding=0)
         
         
     def forward(self, x):

@@ -5,7 +5,11 @@ import numpy as np
 import pandas as pd
 import os
 import utils
+import h5py
+import shutil
+from tqdm import tqdm
 from skimage.transform import resize
+from collections import Sequence
 
 import torch
 from torch.utils.data import Dataset
@@ -282,13 +286,12 @@ class SunImageDataset(Dataset):
     
     '''
     
-    processed_path = pathlib.Path('../datasets/processed')
     
     hei_types = ['cont', 'ew', 'color']
     sdo_types = ['0094', '0131', '0171', '0193', '0211', '0304', '0335', '1600', '1700', '4500']
     
-    x_type = 'ew'
-    y_type = '0304'
+    x_type = 'in'
+    y_type = 'out'
     
     excluded_dates = ['2013-04-17-H18-M24',
                       '2012-08-23-H21-M55',
@@ -386,7 +389,7 @@ class SunImageDataset(Dataset):
                            '2016-05-01T12:00:00.000': 0.00702}
     
     
-    def __init__(self, transform=None, remake=False, correct_sensor_data=True):
+    def __init__(self, transform=None, remake=False, correct_sensor_data=True, load_into_memory=False, in_types=['ew'], out_types=['0304'], folder_indices=None, remake_images=False, data_source='hard-disk'):
         '''
         Parameters
         ----------
@@ -399,9 +402,29 @@ class SunImageDataset(Dataset):
             time.
         '''
         self.transform = transform
-        self.x_data = None
-        self.y_data = None
-        self.get_all_images(remake=remake, correct_sensor_data=correct_sensor_data)
+        self.in_types = in_types
+        self.out_types = out_types
+        self.processed_path = pathlib.Path('../datasets/processed')
+        self.save_folder = pathlib.Path('../datasets')
+        self.save_name = 'images.h5'
+        self.save_location = self.save_folder / self.save_name
+        self.load_into_memory = load_into_memory
+        self.data_source = data_source
+        if data_source == 'hard-disk':
+            self.access_location = self.save_location
+        elif data_source == 'ssd':
+            root_path = pathlib.Path('/mnt/tmp/apineci')
+            root_path.mkdir(parents=False, exist_ok=True)
+            self.access_location = root_path / self.save_name
+            
+        self.get_all_images(remake=remake, 
+                            correct_sensor_data=correct_sensor_data, 
+                            in_types=self.in_types, 
+                            out_types=self.out_types,
+                            folder_indices=folder_indices,
+                            remake_images=remake_images)
+        
+            
         
     def set_transform(self, transform=None):
         '''Sets the transform of the class.
@@ -420,7 +443,47 @@ class SunImageDataset(Dataset):
         eff_area = list(self.interpolation_values.values())
         return np.interp(date_timestamp, start_dates, eff_area)
             
+    def check_valid_fits_file(self, file, img_type):
+        try:
+            if img_type in self.sdo_types:
+                with fits.open(file) as hdulist:
+                    hdulist[1].verify('fix')
+                    quality = hdulist[1].header['QUALITY']
+                    exptime = hdulist[1].header['EXPTIME']
+                    dataskew = hdulist[1].header['DATASKEW']
+                    datakurt = hdulist[1].header['DATAKURT']
+                    valid = quality == 0
+                    if img_type == '0304':
+                        valid = valid and np.abs(exptime-3) <= 1
+                    return valid
+            else:
+                return True
+        except:
+            return False
         
+    def get_image_type(self, file):
+        filename = file.parts[-1]
+        image_type = None
+        if file.suffix == '.gz':
+            filename = filename[0:-7]
+        else:
+            filename = filename[0:-5]
+        types = filename.split('_')
+        if len(types) > 1:
+            image_type = types[-1]
+        else:
+            image_type = 'color'
+        return image_type, filename
+        
+    def check_valid_fits_folder(self, folder, allowed_types):
+        valid = True
+        found_types = []
+        for file in [x for x in folder.iterdir() if x.suffix == '.gz' or x.suffix == '.fits']:
+            image_type, _ = self.get_image_type(file)
+            found_types.append(image_type)
+            if image_type in allowed_types:
+                valid = valid and self.check_valid_fits_file(file, image_type)
+        return valid and all([t in found_types for t in allowed_types])
                   
                 
     def get_images(self, folder, allowed_types):
@@ -447,19 +510,7 @@ class SunImageDataset(Dataset):
         '''
         images = []
         for file in [x for x in folder.iterdir() if x.suffix == '.gz' or x.suffix == '.fits']:
-            filename = file.parts[-1]
-            
-            #Get the image type
-            image_type = None
-            if file.suffix == '.gz':
-                filename = filename[0:-7]
-            else:
-                filename = filename[0:-5]
-            types = filename.split('_')
-            if len(types) > 1:
-                image_type = types[-1]
-            else:
-                image_type = 'color'
+            image_type, filename = self.get_image_type(file)
                 
             #Only proceed to process the image if it is of an allowed type
             if image_type in allowed_types:
@@ -475,13 +526,16 @@ class SunImageDataset(Dataset):
                 image_card_id = None
                 if image_type in self.hei_types:
                     image_card_id = 0
+                    
                 elif image_type in self.sdo_types:
                     image_card_id = 1
 
                 #Read the data from the card
                 image_data = None
                 with fits.open(file) as hdulist:
+                    #hdulist.info()
                     hdulist[image_card_id].verify('fix')
+                    #print(hdulist[image_card_id].header)
                     image_data = hdulist[image_card_id].data
                 if len(image_data.shape) == 3:
                     image_data = np.transpose(image_data, (1, 2, 0))    
@@ -490,7 +544,7 @@ class SunImageDataset(Dataset):
         return images
     
     
-    def read_all_images(self, allowed_types=['ew', '0304'], new_size=(864, 864)):
+    def read_all_images(self, save_folder, save_name, in_types=['ew'], out_types=['0304'], new_size=(864, 864), remake=False, folder_indices=None, correct_sensor_data=True, remake_images=False):
         '''This function reads all entries in the processed folder. It stores
         the resulting images in a pandas dataframe which contains a column for
         each image type, along with the date of that entry, which can be thought
@@ -515,33 +569,130 @@ class SunImageDataset(Dataset):
         df : pd.DataFrame
             A dataframe containg columns of 'allowed_types' and a date column
         '''
-        df = pd.DataFrame()
-        i = 1
-        for folder in self.processed_path.iterdir():
-            try:
-                entry_date = pd.to_datetime(folder.parts[-1], format="%Y-%m-%d-H%H-M%M")
-                image_dict = {}
-                image_dict['date'] = entry_date
-                for image in self.get_images(folder, allowed_types):
-                    data = image.data
-                    #Remove 80 pixels to have the sun take about the same space in the frame
-                    #as the 'ew' images
-                    if image.image_type == '0304':
-                        height, width = data.shape
-                        pixel_remove_width = 80
-                        data = data[pixel_remove_width:(height-pixel_remove_width), pixel_remove_width:(width-pixel_remove_width)]
-                    image_dict[image.image_type] = resize(data, (new_size[0], new_size[1]))
-                    image_dict[image.image_type] = image_dict[image.image_type].astype(dtype='float32')
-                    print(image_dict[image.image_type].shape)
-                image_series = pd.Series(image_dict)
-                df = df.append(image_series, ignore_index=True)
-                print('Dataframe shape: ' + str(df.shape) + '\tFolder: ' + str(i))
-            except:
-                print('Failed to read folder: ' + str(i))
-            i += 1
-        return df
+        save_location = save_folder / save_name
+        temp_location = save_folder / 'temp.h5'
+
+        allowed_types = in_types + out_types
+        if remake:
+            if save_location.exists():
+                save_location.unlink()
+            if temp_location.exists():
+                temp_location.unlink()
+            i, created_dataset = -1, False
+            num_folders = sum([1 for _ in self.processed_path.iterdir()])
+            with tqdm(total=num_folders, desc='Processing dataset folders') as pbar:
+                with h5py.File(temp_location, 'w') as hf:
+                    data_shape = (num_folders, new_size[0], new_size[1])
+                    hf.create_dataset('date', shape=(num_folders, ))
+                    for type_name in allowed_types:
+                        hf.create_dataset(type_name, shape=data_shape, dtype=np.float32)
+                        #hf[type_name].attrs['date'] = image_dict['date'].value
+                with h5py.File(temp_location, 'a') as hf:
+                    for folder in self.processed_path.iterdir():
+                        pbar.update(1)
+                        try:
+                            i += 1
+                            if folder_indices is not None:
+                                if i < folder_indices[0] or i > folder_indices[1]:
+                                    continue
+                            if not self.check_valid_fits_folder(folder, allowed_types):
+                                continue
+                            entry_date = pd.to_datetime(folder.parts[-1], format="%Y-%m-%d-H%H-M%M")
+                            image_dict = {}
+                            image_dict['date'] = entry_date
+                            hf['date'][i] = image_dict['date'].value / 10 ** 9
+                            for image in self.get_images(folder, allowed_types):
+                                data = image.data
+                                #Remove 80 pixels to have the sun take about the same space in the frame
+                                #as the 'ew' images
+                                if image.image_type in ['0171', '0304']:
+                                    height, width = data.shape
+                                    pixel_remove_width = 80
+                                    data = data[pixel_remove_width:(height-pixel_remove_width), pixel_remove_width:(width-pixel_remove_width)]
+                                if correct_sensor_data and image.image_type == '0304':
+                                    data = data * 1/self.get_interpolation_value(hf['date'][i])
+                                image_dict[image.image_type] = resize(data, (new_size[0], new_size[1]))
+                                image_dict[image.image_type] = image_dict[image.image_type].astype(dtype='float32')
+                            #print("Read Folder Images!")
+                            n_read = 0
+
+                            
+                            for type_name in allowed_types:
+                                hf[type_name][i, :, :] = image_dict[type_name]
+                                n_read = hf[type_name].shape[0]
+                            #print("Wrote images to hf!")
+                            #hf['date'].resize((hf['date'].shape[0] + 1), axis=0)
+                            #hf['date'][-1:] = image_dict['date'].value / 10 ** 9
+                            #for type_name in allowed_types:
+                            #    hf[type_name].resize((hf[type_name].shape[0] + 1), axis=0)
+                            #    print(hf[type_name][-1:].shape)
+                            #    print(image_dict[type_name].shape)
+                            #    hf[type_name][-1:] = image_dict[type_name]
+                            #    n_read = hf[type_name].shape[0]
+                        
+                                        #print('Type Name: ' + type_name + ' Shape: ' + str(hf[type_name].shape))
+                            #print("Read " + str(n_read) + " images!")
+
+                        except KeyboardInterrupt:
+                            print("Quitting...")
+                            break
+                    
+                #except:
+                #    print('Failed to read folder: ' + str(i))
+                
+            #print("Read " + str(n_read) + " images!")
+        if remake_images or remake:
+            if save_location.exists():
+                save_location.unlink()
+            excluded_dates_list = list(map(lambda x: pd.to_datetime(x, format="%Y-%m-%d-H%H-M%M").value / 10 ** 9, self.excluded_dates))
+
+            to_keep = []
+            eps = 1e-7
+            with h5py.File(temp_location, 'a') as hf:
+                n_read = hf['date'].shape[0]
+                for idx in tqdm(range(n_read), desc='Checking for bad images'):
+                    date = hf['date'][idx]
+                    matching_times = list(filter(lambda x: np.abs(x) < 100, list(map(lambda x: x - date, excluded_dates_list))))
+                    date_check = len(matching_times) == 0 and date != 0
+                    #print(date_check)
+                    nan_check, std_check = True, True
+                    for type_name in allowed_types:
+                        arr = hf[type_name][idx]
+                        nan_check = nan_check and not np.isnan(arr.mean())
+                        std_check = std_check and np.std(arr) > eps
+                    if nan_check and std_check and date_check:
+                        to_keep.append(idx)
+                        
+                
+                with h5py.File(save_location, 'w') as hf_save:
+                    data_shape = (len(to_keep), 1, new_size[0], new_size[1])
+                    hf_save.create_dataset('date', shape=(len(to_keep),), chunks=True)
+                    for in_type in in_types:
+                            hf_save.create_dataset(in_type, shape=data_shape, dtype=np.float32, chunks=True)
+                    for out_type in out_types:
+                            hf_save.create_dataset(out_type, shape=data_shape, dtype=np.float32, chunks=True)
+                    for i in tqdm(range(len(to_keep)), desc='Copying good images'):
+                        for in_type in in_types:
+                            hf_save[in_type][i, 0, :, :] = hf[in_type][to_keep[i], :, :]
+                        for out_type in out_types:
+                            hf_save[out_type][i, 0, :, :] = hf[out_type][to_keep[i], :, :]
+                        hf_save['date'][i] = hf['date'][to_keep[i]]
+                    '''
+                    in_data_shape = (len(to_keep), len(in_types), new_size[0], new_size[1])
+                    out_data_shape = (len(to_keep), len(out_types), new_size[0], new_size[1])
+                    hf_save.create_dataset('x', shape=in_data_shape, dtype=np.float32, chunks=True)
+                    hf_save.create_dataset('y', shape=out_data_shape, dtype=np.float32, chunks=True)
+                    hf_save.create_dataset('date', shape=(len(to_keep),), chunks=True)
+                    for i in range(len(to_keep)):
+                        for in_type_idx in range(len(in_types)):
+                            hf_save['x'][i, in_type_idx, :, :] = hf[in_types[in_type_idx]][to_keep[i], :, :]
+                        for out_type_idx in range(len(out_types)):
+                            hf_save['y'][i, out_type_idx, :, :] = hf[out_types[out_type_idx]][to_keep[i], :, :]
+                        hf_save['date'][i] = hf['date'][to_keep[i]]
+                    '''
+                    print("Kept " + str(len(to_keep)) + " images!")
     
-    def get_all_images(self, remake=False, correct_sensor_data=True, size=(864, 864)):
+    def get_all_images(self, remake=False, correct_sensor_data=True, size=(864, 864), in_types=['ew'], out_types=['0304'], folder_indices=None, remake_images=False):
         '''Loads all the image data as tensors. To speed up reading time, a copy of the
         tensor is saved to disk to facilitate loading the images again. If remake
         is True, then all images are read again rather than reading the tensor. This
@@ -556,37 +707,24 @@ class SunImageDataset(Dataset):
             Otherwise, the images are all re-read
         
         '''
-        save_location = pathlib.Path('../datasets')
-        if save_location.exists() and not remake:
-            self.x_data = torch.load(save_location / 'x_images.pt')
-            self.y_data = torch.load(save_location / 'y_images.pt')
-            self.dates_data = torch.load(save_location / 'dates.pt')
-        else:
-            df = self.read_all_images(new_size=size)
-            df = df.dropna()
-            df = df[~df['date'].isin(list(map(lambda x: pd.to_datetime(x, format="%Y-%m-%d-H%H-M%M"), self.excluded_dates)))]
-            self.x_data = np.array(list(df[self.x_type].values), dtype=np.float32)
-            self.y_data = np.array(list(df[self.y_type].values), dtype=np.float32)
-            self.dates_data = np.array(list(map(lambda x: x.astype('datetime64[s]').astype('int'), df['date'].values)))
-            torch.save(self.x_data, save_location / 'x_images.pt')
-            torch.save(self.y_data, save_location / 'y_images.pt')
-            torch.save(self.dates_data, save_location / 'dates.pt')
-        print(self.x_data.shape)
-        print(self.y_data.shape)
-            
-        to_keep = []
-        for i in range(len(self)):
-            arr_x = self.x_data[i].reshape(size)
-            arr_y = self.y_data[i].reshape(size)
-            if not np.isnan(arr_x.mean()) and not np.isnan(arr_y.mean()):
-                to_keep.append(i)
-                if correct_sensor_data:
-                    self.y_data[i] = self.y_data[i] * 1/self.get_interpolation_value(self.dates_data[i])
+        #self.dates_data, self.x_data, self.y_data = self.read_all_images(self.save_folder, self.save_name, new_size=size, remake=remake)
+        self.read_all_images(self.save_folder, self.save_name, new_size=size, remake=remake, in_types=in_types, out_types=out_types, folder_indices=folder_indices, remake_images=remake_images)
+        if self.load_into_memory:
+            with h5py.File(self.save_location, 'a') as hf:
+                self.x_data = {}
+                self.y_data = {}
+                for in_type in self.in_types:
+                    self.x_data[in_type] = hf[in_type][:]
+                for out_type in self.out_types:
+                    self.y_data[out_type] = hf[out_type][:]
+        if self.data_source == 'ssd':
+            if not self.access_location.exists():
+                shutil.copy(self.save_location, self.access_location)
+        with h5py.File(self.access_location, 'a') as hf:
+            self.dates_data = hf['date'][:]
+            self.length = hf[self.in_types[0]].shape[0]
         
-        self.x_data = self.x_data[to_keep, :, :]
-        self.y_data = self.y_data[to_keep, :, :]
-        self.x_data = self.x_data[:, None, :, :]
-        self.y_data = self.y_data[:, None, :, :]
+                    
     
     def __len__(self):
         '''Returns the number of entries in the dataset, i.e., the number of data
@@ -598,7 +736,7 @@ class SunImageDataset(Dataset):
         len : int
             Number of data points
         '''
-        return list(self.x_data.shape)[0]
+        return self.length
     
     def __getitem__(self, idx):
         '''Returns a slice of the tensors according to the input indices along the data point axis. 
@@ -621,9 +759,45 @@ class SunImageDataset(Dataset):
         
         '''
         if torch.is_tensor(idx):
-            idx = idx.tolist()
-            
-        sample = {self.x_type: self.x_data[idx], self.y_type: self.y_data[idx]}
+            idx = idx.tolist()    
+        #print(idx)
+        #print(type(idx))
+        #print(isinstance(idx, Sequence))
+        concat_axis = 1 if isinstance(idx, Sequence) or isinstance(idx, slice)  or isinstance(idx, np.ndarray) else 0
+        
+
+        sample_x, sample_y = [], []
+        if self.load_into_memory:
+            for in_type in self.in_types:
+                sample_x.append(self.x_data[in_type][idx])
+            for out_type in self.out_types:
+                sample_y.append(self.y_data[out_type][idx])
+        else:
+            with h5py.File(self.access_location, 'a') as hf:
+                for in_type in self.in_types:
+                    sample_x.append(hf[in_type][idx])
+                for out_type in self.out_types:
+                    sample_y.append(hf[out_type][idx])
+        
+        sample = {}
+        sample[self.x_type] = None
+        sample[self.y_type] = None
+        for i in range(len(sample_x)):
+            data = sample_x[i]
+            #if concat_axis == 1:
+            #    data = data[None, :, :, :]
+            if sample[self.x_type] is None:
+                sample[self.x_type] = data
+            else:
+                sample[self.x_type] = np.concatenate((sample[self.x_type], data), axis=concat_axis)
+        for i in range(len(sample_y)):
+            data = sample_y[i]
+            #if concat_axis == 1:
+            #    data = data[None, :, :, :]
+            if sample[self.y_type] is None:
+                sample[self.y_type] = data
+            else:
+                sample[self.y_type] = np.concatenate((sample[self.y_type], data), axis=concat_axis)
         
         if self.transform is not None:
             sample = self.transform(sample)
