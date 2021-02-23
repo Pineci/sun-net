@@ -7,6 +7,7 @@ import pandas as pd
 from tqdm import tqdm
 import h5py
 import os
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -315,8 +316,9 @@ class SunModel(object):
         self.early_stopping_min_delta = min_delta
         self.early_stopping_percentage = percentage
         self.early_stopping = EarlyStopping(patience=patience, mode=mode, min_delta=min_delta, percentage=percentage)
+    
         
-    def create_train_val_test_sets(self, val_proportion=0.2, test_proportion=0.2, random_state=None, power_transforms=[[None], [0.0]], train_stats_dict=None):
+    def create_train_val_test_sets(self, val_proportion=0.2, test_proportion=0.2, random_state=None, power_transforms=[[None], [0.0]], train_stats_dict=None, train_idx=None, val_idx=None, test_idx=None, mode='random'):
         '''Creates training and validation sets for the model to train on. Uses the
         random_state as a seed to shuffle the indices, and can be set to the same value
         for reproducability. The val_proportion variable can be used to specify the 
@@ -333,6 +335,47 @@ class SunModel(object):
             Seed for the random number generator. If None, a random seed is selected (default = None)
         '''
         print('Setting up training set...')
+        
+        
+        def get_all_dates():
+            times = self.dataset.get_date(list(range(len(self.dataset))))
+            return list(map(lambda x: datetime.fromtimestamp(x), times))
+        
+        #train_idx, val_idx, test_idx = None, None, None
+        if mode != 'random':
+            dates=get_all_dates()
+            train_idx, val_idx, test_idx = [], [], []
+            if mode == 'month-regular': #Jan-June is train, July-Sep valid, Oct-Dec test
+                for i in range(len(dates)):
+                    month = dates[i].month
+                    if month <= 6:
+                        train_idx.append(i)
+                    elif month >= 7 and month <= 9:
+                        val_idx.append(i)
+                    else:
+                        test_idx.append(i)
+            if mode == 'month':
+                years = list(map(lambda x: x.year, dates))
+                min_yr, max_yr = min(years), max(years)
+                month_designations = {}
+                np.random.seed(random_state)
+                for yr in range(min_yr, max_yr+1):
+                    months = ['train'] * 6 + ['valid']*3 + ['test']*3
+                    np.random.shuffle(months)
+                    month_designations[yr] = months
+                #print(months.keys())
+                for i in range(len(dates)):
+                    #print(dates[i].month-1)
+                    designation = month_designations[dates[i].year][dates[i].month-1]
+                    if designation == 'train':
+                        train_idx.append(i)
+                    elif designation == 'valid':
+                        val_idx.append(i)
+                    elif designation == 'test':
+                        test_idx.append(i)
+                
+                
+        
         self.best_score = np.inf
         self.val_proportion = val_proportion
         self.test_proportion = test_proportion
@@ -350,13 +393,20 @@ class SunModel(object):
         indices = list(range(n_tot))
         np.random.seed(random_state)
         np.random.shuffle(indices)
-        train_idx, val_idx, test_idx = indices[:n_train], indices[n_train:n_val+n_train], indices[n_val+n_train:n_tot]
+        train_idx_t, val_idx_t, test_idx_t = indices[:n_train], indices[n_train:n_val+n_train], indices[n_val+n_train:n_tot]
         
-        self.train_idx = np.sort(train_idx)
-        self.val_idx = np.sort(val_idx)
-        self.test_idx = np.sort(test_idx)
+        print("Random State: {}".format(random_state))
         
-        if train_stats_dict is None:
+        self.train_idx = np.sort(train_idx_t)
+        self.val_idx = np.sort(val_idx_t)
+        self.test_idx = np.sort(test_idx_t)
+        
+        if train_idx is not None and val_idx is not None and test_idx is not None:
+            self.train_idx = np.sort(train_idx)
+            self.val_idx = np.sort(val_idx)
+            self.test_idx = np.sort(test_idx)
+        
+        if train_stats_dict is None or True:
             #train_tensor_dict = self.dataset[self.train_idx]
             #x_train_data = train_tensor_dict[self.in_feature]
             #y_train_data = train_tensor_dict[self.out_feature]
@@ -364,27 +414,67 @@ class SunModel(object):
             metric_eval_batch_size = 100
             #x_train_min, y_train_min = np.Inf, np.Inf
             x_train_min, y_train_min = None, None
+            x_train_max, y_train_max = None, None
+            x_positive, x_negative, y_positive, y_negative = 0, 0, 0, 0
+            
+            threshold_x = -4662.5
+            threshold_y = -82.43375
+            
             for i in range(0, n_tot, metric_eval_batch_size):
                 data_slice = self.dataset[i:(i+metric_eval_batch_size)]
                 slice_x_mins = np.min(data_slice[self.in_feature], axis=(0, 2, 3))
                 slice_y_mins = np.min(data_slice[self.out_feature], axis=(0, 2, 3))
+                slice_x_maxs = np.max(data_slice[self.in_feature], axis=(0, 2, 3))
+                slice_y_maxs = np.max(data_slice[self.out_feature], axis=(0, 2, 3))
+                
+                
+                x_positive += np.sum(data_slice[self.in_feature] >= threshold_x)
+                x_negative += np.sum(data_slice[self.in_feature] < threshold_x)
+                y_positive += np.sum(data_slice[self.out_feature] >= threshold_y)
+                y_negative += np.sum(data_slice[self.out_feature] < threshold_y)
+                
                 if x_train_min is None:
                     x_train_min = slice_x_mins
                 else:
                     x_train_min = np.min(np.concatenate((x_train_min[:, None], slice_x_mins[:, None]), axis=1), axis=1)
+                if x_train_max is None:
+                    x_train_max = slice_x_maxs
+                else:
+                    x_train_max = np.min(np.concatenate((x_train_max[:, None], slice_x_maxs[:, None]), axis=1), axis=1)
+                    
                 if y_train_min is None:
                     y_train_min = slice_y_mins
                 else:
                     y_train_min = np.min(np.concatenate((y_train_min[:, None], slice_y_mins[:, None]), axis=1), axis=1)
+                if y_train_max is None:
+                    y_train_max = slice_y_maxs
+                else:
+                    y_train_max = np.min(np.concatenate((y_train_max[:, None], slice_y_maxs[:, None]), axis=1), axis=1)
                 #x_train_min = np.min((x_train_min, np.min(data_slice[self.in_feature])))
                 #y_train_min = np.min((y_train_min, np.min(data_slice[self.out_feature])))
-                #print(x_train_min)
-                #print(y_train_min)
+                
+            #print('X Minimum: {}'.format(x_train_min))
+            #print('Y Minimum: {}'.format(y_train_min))
+            #print('X Maximum: {}'.format(x_train_max))
+            #print('Y Maximum: {}'.format(y_train_max))
+            
+            #print('X Positive Count: {}'.format(x_positive))
+            #print('X Negative Count: {}'.format(x_negative))
+            #print('Y Positive Count: {}'.format(y_positive))
+            #print('Y Negative Count: {}'.format(y_negative))
+            
+            #print('X Ratio to exclude: {}'.format(x_negative/(x_negative+x_positive)))
+            #print('Y Ratio to exclude: {}'.format(y_negative/(y_negative+y_positive)))
+            
+            print(x_train_min)
+            
+            threshold_x = [threshold_x]
+            threshold_y = [threshold_y]
 
             #x_transform, y_transform = self.power_transforms
             power_trans = transforms.PowerTransform([self.in_feature, self.out_feature],
                                                     lambdas=self.power_transforms, 
-                                                    mins=[x_train_min, y_train_min])
+                                                    mins=[threshold_x, threshold_y])
             x_vals, x2_vals, y_vals, y2_vals = None, None, None, None
             n_x_vals, n_y_vals = None, None
             for i in range(0, n_train, metric_eval_batch_size):
@@ -404,8 +494,6 @@ class SunModel(object):
                 
 
                 shape_x, shape_y = x_train_slice.shape, y_train_slice.shape
-                #print(shape_x)
-                #print(shape_y)
                 if n_x_vals is None:
                     n_x_vals = np.zeros(shape=(shape_x[1]))
                 if n_y_vals is None:
@@ -439,12 +527,15 @@ class SunModel(object):
             y_train_std = np.sqrt(y2_vals / n_y_vals + np.square(y_train_mean))
             
             self.train_stats_dict = {}
-            self.train_stats_dict['x_train_min'] = x_train_min
-            self.train_stats_dict['y_train_min'] = y_train_min
+            self.train_stats_dict['x_train_min'] = threshold_x
+            self.train_stats_dict['y_train_min'] = threshold_y
+            #self.train_stats_dict['x_train_min'] = x_train_min
+            #self.train_stats_dict['y_train_min'] = y_train_min
             self.train_stats_dict['x_train_mean'] = x_train_mean
             self.train_stats_dict['y_train_mean'] = y_train_mean
             self.train_stats_dict['x_train_std'] = x_train_std
             self.train_stats_dict['y_train_std'] = y_train_std
+            print(self.train_stats_dict)
         else:
             
             if not isinstance(train_stats_dict['x_train_min'], np.ndarray):
@@ -575,6 +666,9 @@ class SunModel(object):
         model_properties['random_state'] = self.random_state        
         model_properties['power_transforms'] = self.power_transforms
         model_properties['train_stats_dict'] = self.train_stats_dict
+        model_properties['train_idx'] = self.train_idx
+        model_properties['val_idx'] = self.val_idx
+        model_properties['test_idx'] = self.test_idx
         
         checkpoint = {}
         checkpoint['epoch'] = self.last_epoch
@@ -593,7 +687,7 @@ class SunModel(object):
         
         
         '''
-        checkpoint = torch.load(self.save_path)
+        checkpoint = torch.load(self.save_path, map_location=self.device)
 
         model_properties = checkpoint['model_properties']
         
@@ -637,12 +731,19 @@ class SunModel(object):
         self.early_stopping.load_state(model_properties['early_stopping_state'])
         
         print("Loading Training Set Settings...")
+        if 'train_idx' in model_properties:
+            train_idx = model_properties['train_idx']
+            val_idx = model_properties['val_idx']
+            test_idx = model_properties['test_idx']
+        else:
+            train_idx, val_idx, test_idx = None, None, None
         self.create_train_val_test_sets(val_proportion=model_properties['val_proportion'], 
                                         test_proportion=model_properties['test_proportion'], 
                                         random_state=model_properties['random_state'],
                                         power_transforms=model_properties['power_transforms'],
                                         #train_stats_dict=None)
-                                        train_stats_dict=model_properties['train_stats_dict'])
+                                        train_stats_dict=model_properties['train_stats_dict'],
+                                        train_idx=train_idx, val_idx=val_idx, test_idx=test_idx)
         
        
         print("Loading Model...")
@@ -749,6 +850,14 @@ class SunModel(object):
                     re_tensor = torch.abs(diff / (out_imgs * mask))
                     re_tensor[torch.isnan(re_tensor)] = 0
                     total_loss[metric] += torch.sum(re_tensor) / torch.sum(mask)
+                elif metric == 'MSE':
+                    mse = nn.MSELoss(reduction='sum')
+                    loss = mse(out_pred * mask, out_imgs * mask) / torch.sum(mask)
+                    total_loss[metric] += loss.item()
+                elif metric == 'MAE':
+                    mae = nn.L1Loss(reduction='sum')
+                    loss = mae(out_pred * mask, out_imgs * mask) / torch.sum(mask)
+                    total_loss[metric] += loss.item()
                 
                     
             #loss = self.criterion(out_pred * mask, out_imgs * mask) / torch.sum(mask)
@@ -966,6 +1075,11 @@ class SunModel(object):
         '''
         train_loader = DataLoader(self.train, batch_size=self.batch_size, shuffle=True, pin_memory=True)
         val_loader = DataLoader(self.val, batch_size=self.batch_size, shuffle=False, pin_memory=True)
+        
+        print('BEGIN MODEL TRAINING')
+        print('Model Training head: {}'.format(self.train_idx[:10]))
+        print('Model Validation head: {}'.format(self.val_idx[:10]))
+        print('Model Testing head: {}'.format(self.test_idx[:10]))
         
         done = self.early_stopping.step(None, check=True)
         while self.last_epoch < epochs and not done:
@@ -1325,7 +1439,7 @@ class SunModel(object):
             fig_tot.savefig(image_save_folder / (str(img_idx) + '.png'), dpi=dpi)
             plt.close(fig_tot)
             
-    def generate_in_out_reversal_comparison_images(self, series_name_1, series_name_2, image_folder, series_1_model_type, series_2_model_type, idx, std_scale_range=3, dpi=None):
+    def generate_in_out_reversal_comparison_images(self, series_name_1, series_name_2, image_folder, series_1_model_type, series_2_model_type, idx, std_scale_range=3, dpi='figure', im_format='pdf'):
         #Series 1 should be generated by model comparison
         #Series 2 should be generated by sunmodel
         series_file_1 = self.save_folder / series_name_1
@@ -1397,7 +1511,7 @@ class SunModel(object):
                     ax_tot[r, c].axis('off')
                     ax_tot[r, c].set_aspect('equal')
 
-                    mesh_tot = ax_tot[r, c].pcolormesh(data, cmap='viridis')
+                    mesh_tot = ax_tot[r, c].pcolormesh(data, cmap='viridis', rasterized=True)
                     mesh_tot.set_clim(color_limits[0], color_limits[1])
                     ax_tot[r, c].text(0.5, 0.0, name, transform=ax_tot[r, c].transAxes, fontsize=16, va='top',ha='center')
                     #if r == 0:
@@ -1411,16 +1525,18 @@ class SunModel(object):
                             axes_order = axes_order[::-1]
                         con = ConnectionPatch(xyA=arrow_dir[0], xyB=arrow_dir[1], coordsA="axes fraction", coordsB="axes fraction",
                                               axesA=ax_tot[r, axes_order[0]], axesB=ax_tot[r, axes_order[1]], color="red",
-                                              arrowstyle='->', mutation_scale=30)
+                                              arrowstyle='->', mutation_scale=30, lw=5.0)
                         ax_tot[r, c].add_artist(con)
-                    
-            fig_tot.subplots_adjust(hspace=0.075, wspace=0.3)        
-            fig_tot.colorbar(mesh_tot, ax=ax_tot.ravel().tolist())
+            cax = fig_tot.add_axes([ax_tot[1, 0].get_position().x0, ax_tot[1, 0].get_position().y0-0.08, ax_tot[1, 1].get_position().x1-ax_tot[1, 0].get_position().x0, 0.03])
+            fig_tot.subplots_adjust(hspace=0.15, wspace=0.2)   
+            #print(ax_tot.ravel().tolist())
+            #fig_tot.colorbar(mesh_tot, ax=ax_tot.ravel().tolist(), orientation='horizontal', shrink=0.75)
+            fig_tot.colorbar(mesh_tot, cax=cax, orientation='horizontal')
             plt.show()
-            fig_tot.savefig(image_save_folder / (str(img_idx) + '.png'), dpi=dpi)
+            fig_tot.savefig(image_save_folder / (str(img_idx) + '.' + im_format), dpi=dpi)
             plt.close(fig_tot)
             
-    def generate_feature_target_prediction_difference_images(self, series_name, image_folder, model_name, regenerate=False, idx=None, dpi=None, std_colorbar_range=[1, 1, 1, 1], save_format='png', top_left=(0, 0), crop_size=None):
+    def generate_feature_target_prediction_difference_images(self, series_name, image_folder, model_name, regenerate=False, idx=None, dpi=None, std_colorbar_range=[1, 1, 1, 1], im_format='png', top_left=(0, 0), crop_size=None):
         names = ['He I', 'EUV 17.1 nm', 'Error', 'Prediction']
         features = [self.in_types[0], self.out_types[0], model_name]
         
@@ -1461,7 +1577,7 @@ class SunModel(object):
             print((np.average(np.square(images[features[1]] - images[features[2]]))))
 
             
-            image_file_name = 'image_' + str(img_idx) + '.' + save_format
+            image_file_name = 'image_' + str(img_idx) + '.' + im_format
 
             fig, ax = plt.subplots(nrows=2, ncols=2, squeeze=False, figsize=(6, 6))
             i = 0
@@ -1476,7 +1592,7 @@ class SunModel(object):
                         if crop_size is not None:
                             data = data[top_left[0]:top_left[0]+crop_size[0],
                                         top_left[1]:top_left[1]+crop_size[1]]
-                        mesh_err = ax[r, c].pcolormesh(data, cmap='seismic')
+                        mesh_err = ax[r, c].pcolormesh(data, cmap='seismic', rasterized=True)
                         
                         mesh_err.set_clim(-std_vals['error']*crange, std_vals['error']*crange)
                     else:
@@ -1484,7 +1600,7 @@ class SunModel(object):
                         if crop_size is not None:
                             data = data[top_left[0]:top_left[0]+crop_size[0],
                                         top_left[1]:top_left[1]+crop_size[1]]
-                        mesh = ax[r, c].pcolormesh(data, cmap='viridis')
+                        mesh = ax[r, c].pcolormesh(data, cmap='viridis', rasterized=True)
                         std_val = std_vals[features[i]]
                         #std_val = np.std(data)
                         mesh.set_clim(-std_val*crange, std_val*crange)
@@ -1498,12 +1614,14 @@ class SunModel(object):
                     text_boxes.append(text_box)
 
             fig.tight_layout()
-            cax_err = fig.add_axes([ax[0, 1].get_position().x1+0.2,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
-            cax = fig.add_axes([ax[0, 1].get_position().x1+0.05,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
+            #cax_err = fig.add_axes([ax[0, 1].get_position().x1+0.2,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
+            #cax = fig.add_axes([ax[0, 1].get_position().x1+0.05,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
+            cax_err = fig.add_axes([ax[1, 0].get_position().x0, ax[1, 0].get_position().y0-0.19, ax[1, 1].get_position().x1-ax[1, 0].get_position().x0, 0.03])
+            cax = fig.add_axes([ax[1, 0].get_position().x0, ax[1, 0].get_position().y0-0.09, ax[1, 1].get_position().x1-ax[1, 0].get_position().x0, 0.03])
 
             #fig.colorbar(mesh_err, ax=ax.ravel().tolist())
-            fig.colorbar(mesh_err, cax=cax_err)
-            fig.colorbar(mesh, cax=cax)
+            fig.colorbar(mesh_err, cax=cax_err, orientation='horizontal')
+            fig.colorbar(mesh, cax=cax, orientation='horizontal')
 
             fig.savefig(image_save_folder / image_file_name, dpi=dpi, bbox_extra_artists=text_boxes + [cax_err, cax], bbox_inches='tight')
             #shutil.copy(str(file_name_type), str(file_name_all))

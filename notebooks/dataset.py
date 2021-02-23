@@ -7,6 +7,7 @@ import os
 import utils
 import h5py
 import shutil
+import sunpy.map
 from tqdm import tqdm
 from skimage.transform import resize
 from collections import Sequence
@@ -413,7 +414,7 @@ class SunImageDataset(Dataset):
         if data_source == 'hard-disk':
             self.access_location = self.save_location
         elif data_source == 'ssd':
-            root_path = pathlib.Path('/mnt/tmp/apineci')
+            root_path = pathlib.Path('/mnt/scratch/nfs_fs02/apineci')
             root_path.mkdir(parents=False, exist_ok=True)
             self.access_location = root_path / self.save_name
             
@@ -511,6 +512,14 @@ class SunImageDataset(Dataset):
         images = []
         for file in [x for x in folder.iterdir() if x.suffix == '.gz' or x.suffix == '.fits']:
             image_type, filename = self.get_image_type(file)
+            
+            #m = sunpy.map.Map(file)
+            #data = m.data
+            #print(data.shape)
+            #for item in m.meta:
+            #    print("Key: {} Val: {}".format(item, m.meta[item]))
+            #print(m.meta)
+            #break
                 
             #Only proceed to process the image if it is of an allowed type
             if image_type in allowed_types:
@@ -538,7 +547,16 @@ class SunImageDataset(Dataset):
                     #print(hdulist[image_card_id].header)
                     image_data = hdulist[image_card_id].data
                 if len(image_data.shape) == 3:
-                    image_data = np.transpose(image_data, (1, 2, 0))    
+                    image_data = np.transpose(image_data, (1, 2, 0))   
+                #print(image_type)
+                #print(hdulist[image_card_id].header.keys)
+                
+                if image_type in self.hei_types:
+                    exposure_time = hdulist[image_card_id].header['STOPTIME'] - hdulist[image_card_id].header['STARTIME']
+                elif image_type in self.sdo_types:
+                    exposure_time = hdulist[image_card_id].header['EXPTIME']
+                    
+                image_data = image_data / exposure_time
                 new_image = Image(image_date, image_data, image_type, file) 
                 images.append(new_image)
         return images
@@ -573,6 +591,7 @@ class SunImageDataset(Dataset):
         temp_location = save_folder / 'temp.h5'
 
         allowed_types = in_types + out_types
+        remake = remake or not save_location.exists()
         if remake:
             if save_location.exists():
                 save_location.unlink()

@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpl_patches
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.optimize import fsolve
+from datetime import datetime
 
 
 import torch
@@ -83,7 +84,7 @@ class ModelComparison(object):
         self.early_stopping_min_delta = min_delta
         self.early_stopping_percentage = percentage
         
-    def settings_validation_test(self, val_proportion=0.2, test_proportion=0.2, random_state=None, power_transforms=(None, 0.0)):
+    def settings_validation_test(self, val_proportion=0.2, test_proportion=0.2, random_state=None, power_transforms=(None, 0.0), split='random'):
         self.val_proportion = val_proportion
         self.test_proportion = test_proportion
         self.power_transforms = power_transforms
@@ -91,6 +92,33 @@ class ModelComparison(object):
             self.random_state = np.random.randint(0, 1e9, size=1)
         else:
             self.random_state = random_state
+        self.split = split
+        train_idx, val_idx, test_idx = self.split_dates(mode=split)
+        self.train_idx = train_idx
+        self.val_idx = val_idx
+        self.test_idx = test_idx
+            
+    def get_all_dates(self):
+        empty_model = self.load_empty_model()
+        times = empty_model.dataset.get_date(list(range(len(empty_model.dataset))))
+        return list(map(lambda x: datetime.fromtimestamp(x), times))
+    
+    def split_dates(self, mode='random', val_proportion=0.2, test_proportion=0.2):
+        train_idx, val_idx, test_idx = None, None, None
+        if mode == 'random':
+            return train_idx, val_idx, test_idx
+        dates=self.get_all_dates()
+        if mode == 'month-regular': #Jan-June is train, July-Sep valid, Oct-Dec test
+            train_idx, val_idx, test_idx = [], [], []
+            for i in range(len(dates)):
+                month = dates[i].month
+                if month <= 6:
+                    train_idx.append(i)
+                elif month >= 7 and month <= 9:
+                    val_idx.append(i)
+                else:
+                    test_idx.append(i)
+            return train_idx, val_idx, test_idx
             
     def settings_models(self, model_types=['unet', 'fcn8', 'fcn16', 'fcn32'], dropout=None, use_batch_norm=False):
         self.model_types = model_types
@@ -126,6 +154,10 @@ class ModelComparison(object):
         settings['test_proportion'] = self.test_proportion
         settings['random_state'] = self.random_state
         settings['power_transforms'] = self.power_transforms
+        settings['train_idx'] = self.train_idx
+        settings['val_idx'] = self.val_idx
+        settings['test_idx'] = self.test_idx
+        settings['split'] = self.split
        
         settings['model_types'] = self.model_types
         settings['dropout'] = self.dropout
@@ -142,6 +174,9 @@ class ModelComparison(object):
         
         if 'use_batch_norm' not in settings.keys():
             settings['use_batch_norm'] = True
+            
+        if 'split' not in settings.keys():
+            settings['split'] = 'random'
         
         self.settings_criterion(criterion=settings['criterion_type'])
         self.settings_optimizer(optimizer=settings['optimizer_type'],
@@ -159,7 +194,8 @@ class ModelComparison(object):
         self.settings_validation_test(val_proportion=settings['val_proportion'],
                                       test_proportion=settings['test_proportion'],
                                       random_state=settings['random_state'],
-                                      power_transforms=settings['power_transforms'])
+                                      power_transforms=settings['power_transforms'],
+                                      split=settings['split'])
         self.settings_models(model_types=settings['model_types'],
                             dropout=settings['dropout'],
                             use_batch_norm=settings['use_batch_norm'])
@@ -182,8 +218,8 @@ class ModelComparison(object):
     def get_entry_save_name(self, idx):
         return 'image_' + utils.pad_string(str(idx), pad='0', length=4) + '.pkl'
     
-    def get_aggregate_save_name(self, model_type, metric):
-        return model_type + '_' + metric + '.png'
+    def get_aggregate_save_name(self, model_type, metric, im_format='pdf'):
+        return model_type + '_' + metric + '.' + im_format
     
     def get_all_model_types(self):
         all_model_types = []
@@ -240,7 +276,10 @@ class ModelComparison(object):
             model.create_train_val_test_sets(val_proportion=self.val_proportion, 
                                              test_proportion=self.test_proportion, 
                                              random_state=self.random_state,
-                                             power_transforms=self.power_transforms)
+                                             power_transforms=self.power_transforms,
+                                             train_idx=self.train_idx,
+                                             val_idx=self.val_idx,
+                                             test_idx=self.test_idx)
         return model
     
     def load_empty_model(self, add_distance_channel=False, add_latitude_channel=False):
@@ -259,6 +298,10 @@ class ModelComparison(object):
     
     def train_models(self):
         self.save_settings()
+        print('Model Comparison Splits:')
+        print('Training head: {}'.format(self.train_idx[:10]))
+        print('Validation head: {}'.format(self.val_idx[:10]))
+        print('Testing head: {}'.format(self.test_idx[:10]))
         for model_type in self.model_types:
             for dist_channel, lat_channel in zip([False, True, True], [False, False, True]):
                 
@@ -361,7 +404,7 @@ class ModelComparison(object):
                                     else:
                                         hf['type'].attrs[data_type] = np.sum(data_type == types)
 
-    def generate_model_comparisons(self, image_names=None, idx=None, dpi=None, regenerate=False):
+    def generate_model_comparisons(self, image_names=None, idx=None, dpi='figure', regenerate=False):
         if image_names is None:
             image_names = [self.in_feature, self.out_feature] + self.get_all_model_types()
         
@@ -488,8 +531,11 @@ class ModelComparison(object):
                         img_data_type = hf['type'][i][0]
                         true_img = hf[self.out_feature][i]
 
-                        if any(m in metrics for m in ['PE', 'MSE-nolog', 'MAE-nolog']):
+                        if True or any(m in metrics for m in ['PE', 'MSE-nolog', 'MAE-nolog']):
                             true_inv_img = inverse_log(inverse_normal(true_img))
+                            #print('True img sum: {}'.format(true_img.sum()))
+                            #print('Inv True Img sum: {}'.format(true_inv_img.sum()))
+                            #print('Difference: {}'.format(true_img.sum() - true_inv_img.sum()))
 
                         for img in image_names:
 
@@ -497,9 +543,18 @@ class ModelComparison(object):
                             if any(m in metrics for m in ['log_flux', 'flux', 'emission', 'PE', 'MSE-nolog', 'MAE-nolog']):
                                 inv_normal_img = inverse_normal(hf[img][i])
                                 inv_normal_img_mask = np.ma.masked_array(inv_normal_img, mask)
+                                #print('Normal Image sum: {}'.format(inv_normal_img.sum()))
+                                #print('Mask sum: {}'.format(mask.sum()))
+                                #print('Masked Image sum: {}'.format(inv_normal_img_mask.sum()))
+                                #print('Inverse Masked Image sum: {}'.format(np.ma.masked_array(inv_normal_img, 1-mask).sum()))
                             if any(m in metrics for m in ['flux', 'emission', 'PE', 'MSE-nolog', 'MAE-nolog']):
-                                inv_log_img = inverse_log(inv_normal_img)
+                                inv_log_img = inverse_log(np.copy(inv_normal_img))
                                 inv_log_img_mask = np.ma.masked_array(inv_log_img, mask)
+                                #print('Inverse Image sum: {}'.format(inv_log_img.sum()))
+                                #print('Mask sum: {}'.format(mask.sum()))
+                                #print('Masked Inverse Image sum: {}'.format(inv_log_img_mask.sum()))
+                                #print('Inverse Masked Inverse Image sum: {}'.format(np.ma.masked_array(inv_log_img, 1-mask).sum()))
+                                #print(inv_log_img.sum())
                             if any(m in metrics for m in ['MSE', 'SMSE', 'MAE', 'ME']):
                                 diff_data = hf[img][i] - hf[self.out_feature][i]
                             if any(m in metrics for m in ['PE', 'MSE-nolog', 'MAE-nolog']):
@@ -513,8 +568,13 @@ class ModelComparison(object):
                                     if data_type == img_data_type or data_type == 'all':
                                         if metric == 'log_flux':
                                             hf[metric_name][type_indices[data_type]] = inv_normal_img_mask.sum()
+                                            #print('LOG FLUX CALC: {}'.format(inv_normal_img_mask.sum()))
+                                            #print('LOG FLUX STORE: {}'.format(hf[metric_name][type_indices[data_type]]))
                                         elif metric == 'flux':
                                             hf[metric_name][type_indices[data_type]] = inv_log_img_mask.sum()
+                                            #print('FLUX CALC: {}'.format(inv_log_img_mask.sum()))
+                                            #print('FLUX STORE: {}'.format(hf[metric_name][type_indices[data_type]]))
+                                            #print(hf[metric_name][type_indices[data_type]])
                                         elif metric == 'MSE':
                                             hf_temp[metric_name][type_indices[data_type]] = np.square(diff_data)
                                         elif metric == 'SMSE':
@@ -596,12 +656,12 @@ class ModelComparison(object):
                             outliers[data_type] = outliers[data_type] + [i]
         return outliers
         
-    def generate_flux_images(self, metrics=['log_flux', 'flux'], remake=False, regenerate=False, dpi=None, std_scale_range=4):
+    def generate_flux_images(self, metrics=['log_flux', 'flux'], remake=False, regenerate=False, dpi='figure', std_scale_range=4, im_format='pdf'):
         self.calculate_metrics(metrics=metrics, remake=remake)
         all_model_types = self.get_all_model_types()
         all_model_names = self.get_all_model_names()
         with h5py.File(self.series_file, 'r') as hf:
-            with tqdm(total=len(self.data_types) * len(metrics), desc='Generating flux images') as pbar:
+            with tqdm(total=len(self.data_types) * len(metrics)*len(all_model_types), desc='Generating flux images') as pbar:
                 for data_type in self.data_types:
                     for metric in metrics:
                         metric_save_folder = self.aggregate_data_types_folders[data_type] / metric
@@ -681,7 +741,7 @@ class ModelComparison(object):
                                           fancybox=False, framealpha=0.7, 
                                           handlelength=0, handletextpad=0)
 
-                                fig.savefig(metric_save_folder / self.get_aggregate_save_name(all_model_types[i], metric), dpi=dpi)
+                                fig.savefig(metric_save_folder / self.get_aggregate_save_name(all_model_types[i], metric, im_format=im_format), dpi=dpi)
                                 plt.close(fig)
 
                                 ax_tot[r, c].set_xlabel('True')
@@ -695,20 +755,26 @@ class ModelComparison(object):
                                 ax_tot[r, c].legend(handles, labels, loc='best', fontsize='medium', 
                                           fancybox=False, framealpha=0.7, 
                                           handlelength=0, handletextpad=0)
+                                pbar.update(1)
                             fig_tot.tight_layout()
                             #plt.show()
-                            fig_tot.savefig(metric_save_folder / 'comparison.png', dpi=dpi)
+                            fig_tot.savefig(metric_save_folder / ('comparison.' + im_format), dpi=dpi)
                             plt.close(fig_tot)
-                        pbar.update(1)
+                        else:
+                            pbar.update(len(all_model_types))
                         
-    def generate_flux_pair_images(self, metrics=['log_flux', 'flux'], model_type_pairs=['pixelwise', 'fcn8_dist_lat'], model_name_pairs=['Pixelwise', 'FCN with Limb and Lat'], remake=False, regenerate=False, dpi=None, std_scale_range=4, include_stats=False, show_trend_line=[False, True]):
+    def generate_flux_pair_images(self, metrics=['log_flux', 'flux'], model_type_pairs=['pixelwise', 'fcn8_dist_lat'], model_name_pairs=['Pixelwise', 'FCN with Limb and Lat'], remake=False, regenerate=False, dpi='figure', std_scale_range=4, include_stats=False, show_trend_line=[False, True], data_types=None, im_format='pdf'):
+        
+        if data_types is None:
+            data_types = self.data_types
+            
         with h5py.File(self.series_file, 'r') as hf:
-            for data_type in self.data_types:
+            for data_type in data_types:
                 for metric in metrics:
                     metric_save_folder = self.aggregate_data_types_folders[data_type] / metric
                     metric_save_folder.mkdir(parents=True, exist_ok=True)
 
-                    pair_file_name = metric_save_folder / ('pair_' + model_type_pairs[0] + '_' + model_type_pairs[1] + '.png')
+                    pair_file_name = metric_save_folder / ('pair_' + model_type_pairs[0] + '_' + model_type_pairs[1] + '.' + im_format)
                     if regenerate or not pair_file_name.exists():
 
                         fig_tot, ax_tot = plt.subplots(nrows=1, ncols=2, figsize=(8, 4), squeeze=False)
@@ -772,18 +838,106 @@ class ModelComparison(object):
                         fig_tot.tight_layout()
                         #plt.show()
                         fig_tot.savefig(pair_file_name, dpi=dpi)
+                        plt.close(fig_tot)
+                        
+                        
+    def generate_flux_pair_overlay_images(self, metrics=['log_flux', 'flux'], model_type_pairs=['pixelwise', 'fcn8_dist_lat'], model_name_pairs=['Pixelwise', 'FCN with Limb and Lat'], remake=False, regenerate=False, dpi='figure', std_scale_range=4, include_stats=False, show_trend_line=[False, True], data_types=None, im_format='pdf'):
+        
+        if data_types is None:
+            data_types = self.data_types
+        
+        with h5py.File(self.series_file, 'r') as hf:
+            for data_type in data_types:
+                for metric in metrics:
+                    metric_save_folder = self.aggregate_data_types_folders[data_type] / metric
+                    metric_save_folder.mkdir(parents=True, exist_ok=True)
+
+                    pair_file_name = metric_save_folder / ('pair_overlay_' + model_type_pairs[0] + '_' + model_type_pairs[1] + '.' + im_format)
+                    if regenerate or not pair_file_name.exists():
+
+                        fig_tot, ax_tot = plt.subplots(nrows=1, ncols=1, figsize=(4, 4), squeeze=False)
+                        data_colors = ['royalblue', 'orange']
+                        data_line_colors = ['darkviolet', 'chocolate']
+
+                        true_data = hf[data_type + '/' + metric + '/' + self.out_feature][:]
+                        scale_mean, scale_std = np.average(true_data), np.std(true_data)
+                        lowest_val = scale_mean - std_scale_range*scale_std
+                        highest_val = scale_mean + std_scale_range*scale_std
+
+                        val_range = (lowest_val, highest_val)
+                        identity = np.linspace(val_range[0], val_range[1], 100)
+                        
+                        ax_tot[0, 0].set_xlabel('True')
+                        ax_tot[0, 0].set_ylabel('Predicted')
+                        ax_tot[0, 0].set_xlim(val_range[0], val_range[1])
+                        ax_tot[0, 0].set_ylim(val_range[0], val_range[1])
+                        ax_tot[0, 0].set_aspect('equal')
+                        ax_tot[0, 0].plot(identity, identity, '--r')
+                        
+                        handles, labels = [], []
+
+                        for i in range(2):
+                            img = model_type_pairs[i]
+
+                            metric_name = data_type + '/' + metric + '/' + img
+                            pred_data = hf[metric_name][:]
+                            #print(true_data)
+                            #print(true_data == 0)
+                            #print(sum(true_data == 0) / len(true_data))
+                            percent_error = np.average(np.abs(true_data - pred_data) / true_data)
+
+                            residual_func_intercept = lambda i: np.array(((true_data/1e8 - (pred_data/1e8 + i))**2).sum(), ndmin=1)
+                            residual_func_intercept_prime = lambda i: np.array(-2*(true_data/1e8-(pred_data/1e8 + i)).sum(), ndmin=1)
+                            residual_func_slope = lambda m: np.array(((true_data - (pred_data * m))**2).sum(), ndmin=1)
+                            residual_func_slope_prime = lambda m: np.array((-2*pred_data*(true_data - (pred_data * m))).sum(), ndmin=1)
+                            with warnings.catch_warnings():
+                                warnings.simplefilter("ignore")
+                                intercept = fsolve(residual_func_intercept, x0=[0], fprime=residual_func_intercept_prime)[0] * 1e8
+                                slope = fsolve(residual_func_slope, x0=[1], fprime=residual_func_slope_prime)[0]
+                            percent_bias = percent_error - np.average(np.abs(true_data - (pred_data + intercept)) / true_data)
+
+                            #systemic_error_percent = np.abs(slope - 1)
+                            scatter_error_percent = np.average(np.abs(true_data - slope * pred_data) / true_data)
+                            
+                            #ax.scatter(x=true_data, y=pred_data, s=4**2, alpha=0.3, linewidths=0)
+                            true_mean, true_std = np.average(true_data), np.std(true_data)
+                            pred_mean, pred_std = np.average(pred_data), np.std(pred_data)
+                            
+                            #ax_tot[r, c].plot(identity, identity - intercept, ':b')
+                            ax_tot[0, 0].scatter(x=true_data, y=pred_data, s=4**2, alpha=0.3, linewidths=0, c=data_colors[i])
+                            #ax_tot[0, 0].text(0.5, 1.05, model_name_pairs[i], fontsize=16, ha='center', va='bottom', transform=ax_tot[r, c].transAxes)
+                            
+                            handles.append(mpl_patches.Patch(color=data_colors[i], label=model_name_pairs[i]))
+                            #print(data_colors[i])
+                            #handles.append(mpl_patches.Rectangle((0, 0), 1, 0.2, fc=data_colors[i], ec="white", 
+                            #                                 lw=0, alpha=0))
+                            #labels.append(model_name_pairs[i])
+                            if show_trend_line[i]:
+                                ax_tot[0, 0].plot(identity * slope, identity, linestyle=':', color=data_line_colors[i])
+                                handles.append(mpl_patches.Patch(color=data_line_colors[i], label=model_name_pairs[i] + ' Trendline'))
+                                
+                        ax_tot[0, 0].legend(handles=handles, loc='best', fontsize='medium', 
+                                  fancybox=False, framealpha=0.7, 
+                                  handlelength=1, handletextpad=0.5)
+                            
+                                
+                        fig_tot.tight_layout()
+                        #plt.show()
+                        fig_tot.savefig(pair_file_name, dpi=dpi)
                         plt.close(fig_tot)     
 
     
-    def generate_aggregate_comparison_images(self, metrics=['MSE', 'SMSE', 'MAE', 'ME', 'PE'], regenerate=False, dpi=None, std_colorbar_range=4, show_stats=False):
+    def generate_aggregate_comparison_images(self, metrics=['MSE', 'SMSE', 'MAE', 'ME', 'PE'], regenerate=False, dpi='figure', std_colorbar_range=4, show_stats=False, agg_types=['mean', 'median'], data_types=None, im_format='png'):
         all_model_types = self.get_all_model_types()
         all_model_names = self.get_all_model_names()
-        agg_types = ['mean', 'median']
+        if data_types is None:
+            data_types = self.data_types
+        
         
         with h5py.File(self.series_file, 'a') as hf:
-            with tqdm(total=len(metrics)*len(self.data_types)*len(agg_types), desc='Generating aggregate comparisons') as pbar:
+            with tqdm(total=len(metrics)*len(data_types)*len(agg_types)*len(all_model_types), desc='Generating aggregate comparisons') as pbar:
                 for metric in metrics:
-                    for data_type in self.data_types:
+                    for data_type in data_types:
                         for agg_type in agg_types:
                         
                             highest_std = 0
@@ -801,14 +955,14 @@ class ModelComparison(object):
                             metric_save_folder = self.aggregate_data_types_folders[data_type] / metric / agg_type
                             metric_save_folder.mkdir(parents=True, exist_ok=True)
 
-                            comparison_file_name = metric_save_folder / 'comparison.png'
+                            comparison_file_name = metric_save_folder / ('comparison.' + im_format)
 
                             if regenerate or not comparison_file_name.exists():
 
                                 n_model_variations = int(len(all_model_types) / len(self.model_types))
                                 fig_tot, ax_tot = plt.subplots(nrows=n_model_variations, 
                                                                ncols=len(self.model_types),
-                                                               squeeze=False, figsize=(2*(len(self.model_types)+1), 2*n_model_variations))
+                                                               squeeze=False, figsize=(2*(len(self.model_types)), 2*n_model_variations))
                                 for i in range(len(all_model_types)):
                                     metric_name = data_type + '/' + metric + '/' + all_model_types[i] + '/' + agg_type + '/img'
                                     
@@ -827,23 +981,24 @@ class ModelComparison(object):
                                     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(8, 8))
                                     ax.axis('off')
                                     ax.set_aspect('equal')
-                                    mesh = ax.pcolormesh(data, cmap=colormap)
+                                    mesh = ax.pcolormesh(data, cmap=colormap, rasterized=True)
                                     mesh.set_clim(color_limits[0], color_limits[1])
                                     plt.colorbar(mesh,ax=ax)
                                     
                                     if show_stats:
                                         props = dict(boxstyle='square', facecolor='wheat', linewidth=0, alpha=0.15)
                                         ax.text(0.05, 0.95, mean_str, transform=ax.transAxes, fontsize=8, va='top', ha='left', bbox=props)
-                                    fig.savefig(metric_save_folder / self.get_aggregate_save_name(all_model_types[i], metric), dpi=dpi)
+                                    fig.savefig(metric_save_folder / self.get_aggregate_save_name(all_model_types[i], metric, im_format=im_format), dpi=dpi)
                                     plt.close(fig)
 
                                     ax_tot[r, c].axis('off')
                                     ax_tot[r, c].set_aspect('equal')
-                                    mesh_tot = ax_tot[r, c].pcolormesh(data, cmap=colormap)
+                                    mesh_tot = ax_tot[r, c].pcolormesh(data, cmap=colormap, rasterized=True)
                                     mesh_tot.set_clim(color_limits[0], color_limits[1])
                                     #ax_tot[r, c].text(0.5, 1.10, all_model_names[i], fontsize=8, ha='center', transform=ax_tot[r, c].transAxes)
                                     if show_stats:
                                         ax_tot[r, c].text(0.00, 1.00, mean_str_no_new_line, transform=ax_tot[r, c].transAxes, fontsize=6, va='bottom', ha='left', bbox=props)
+                                    pbar.update(1)
                                 
                                 feature_names = ['None', 'Limb', 'Limb + Lat']
                                 for r in range(3):
@@ -853,13 +1008,16 @@ class ModelComparison(object):
                                 for c in range(3):
                                     ax_tot[0, c].text(0.5, 1.05, model_names[c], transform=ax_tot[0,c].transAxes, fontsize=14, va='bottom', ha='center')
                                     
-                                fig_tot.subplots_adjust(hspace=0.2, wspace=0.2)
-                                fig_tot.colorbar(mesh_tot, ax=ax_tot.ravel().tolist())
-                                fig_tot.savefig(metric_save_folder / 'comparison.png', dpi=dpi)
+                                fig_tot.subplots_adjust(hspace=0.2, wspace=-0.275)
+                                cax = fig_tot.add_axes([ax_tot[2, 0].get_position().x0, ax_tot[2, 0].get_position().y0-0.08, ax_tot[2, 2].get_position().x1-ax_tot[2, 0].get_position().x0, 0.03])
+                                #fig_tot.colorbar(mesh_tot, ax=ax_tot.ravel().tolist(), cax=cax, orientation='horizontal', shrink=0.75, fraction=0.05)
+                                fig_tot.colorbar(mesh_tot, cax=cax, orientation='horizontal')
+                                fig_tot.savefig(comparison_file_name, dpi=dpi)
                                 plt.close(fig_tot)
-                            pbar.update(1)
+                            else:
+                                pbar.update(len(all_model_types))
                             
-    def generate_feature_target_images(self, regenerate=False, idx=None, dpi=None, save_format='png', color_limit=1.75):
+    def generate_feature_target_images(self, regenerate=False, idx=None, dpi='figure', save_format='png', color_limit=1.75):
         names = ['He I', 'EUV']
         features = [self.in_feature, self.out_feature]
 
@@ -897,7 +1055,7 @@ class ModelComparison(object):
                 shutil.copy(str(file_name_type), str(file_name_all))
                 plt.close(fig)
                 
-    def generate_feature_target_prediction_images(self, model_type, use_dist_feature=False, use_lat_feature=False, regenerate=False, idx=None, dpi=None, save_format='png', color_limit=1.75):
+    def generate_feature_target_prediction_images(self, model_type, use_dist_feature=False, use_lat_feature=False, regenerate=False, idx=None, dpi='figure', save_format='png', color_limit=1.75):
         names = ['He I', 'EUV', 'Prediction']
         model_name = self.get_model_save_name(model_type, use_dist_feature, use_lat_feature)
         features = [self.in_feature, self.out_feature, model_name]
@@ -937,7 +1095,7 @@ class ModelComparison(object):
                 shutil.copy(str(file_name_type), str(file_name_all))
                 plt.close(fig)
                 
-    def generate_feature_target_prediction_difference_images(self, model_type, use_dist_feature=False, use_lat_feature=False, regenerate=False, idx=None, dpi=None, save_format='png', color_limit_hei=1.75, color_limit_euv=1.0, error_limit=0.75, top_left=(0, 0), crop_size=None, annotations=[]):
+    def generate_feature_target_prediction_difference_images(self, model_type, use_dist_feature=False, use_lat_feature=False, regenerate=False, idx=None, dpi='figure', im_format='pdf', color_limit_hei=1.75, color_limit_euv=1.0, error_limit=0.75, top_left=(0, 0), crop_size=None, annotations=[]):
         names = ['He I', 'EUV', 'Error', 'Prediction']
         model_name = self.get_model_save_name(model_type, use_dist_feature, use_lat_feature)
         features = [self.in_feature, self.out_feature, model_name]
@@ -947,7 +1105,7 @@ class ModelComparison(object):
             if idx is None:
                 idx = range(n)
             for img_idx in tqdm(idx, desc='Generating feature target images'):
-                image_file_name = 'image_' + utils.pad_string(str(img_idx), length=4) + '.' + save_format
+                image_file_name = 'image_' + utils.pad_string(str(img_idx), length=4) + '.' + im_format
                 
                 metric_save_folder_type = self.comparison_data_types_folders[hf['type'][img_idx][0]] / 'feature_target_prediction_diff'
                 metric_save_folder_all = self.comparison_data_types_folders['all'] / 'feature_target_prediction_diff'
@@ -974,14 +1132,14 @@ class ModelComparison(object):
                             if crop_size is not None:
                                 data = data[top_left[0]:top_left[0]+crop_size[0],
                                             top_left[1]:top_left[1]+crop_size[1]]
-                            mesh_err = ax[r, c].pcolormesh(data, cmap='seismic')
+                            mesh_err = ax[r, c].pcolormesh(data, cmap='seismic', rasterized=True)
                             mesh_err.set_clim(-error_limit, error_limit)
                         else:
                             data = np.ma.masked_array(hf[features[i]][img_idx], mask)
                             if crop_size is not None:
                                 data = data[top_left[0]:top_left[0]+crop_size[0],
                                             top_left[1]:top_left[1]+crop_size[1]]
-                            mesh = ax[r, c].pcolormesh(data, cmap='viridis')
+                            mesh = ax[r, c].pcolormesh(data, cmap='viridis', rasterized=True)
                             if c == 1:
                                 mesh.set_clim(-color_limit_euv, color_limit_euv)
                             else:
@@ -1003,12 +1161,17 @@ class ModelComparison(object):
                                       ha='right', va='center', color='black', fontsize=14)
                 
                 fig.tight_layout()
-                cax_err = fig.add_axes([ax[0, 1].get_position().x1+0.2,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
-                cax = fig.add_axes([ax[0, 1].get_position().x1+0.05,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
+                #Vertical Bars
+                #cax_err = fig.add_axes([ax[0, 1].get_position().x1+0.2,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
+                #cax = fig.add_axes([ax[0, 1].get_position().x1+0.05,ax[1, 1].get_position().y0,0.05,ax[0, 1].get_position().y1-ax[1, 1].get_position().y0])
+                #Horizontal Bars
+                cax_err = fig.add_axes([ax[1, 0].get_position().x0, ax[1, 0].get_position().y0-0.19, ax[1, 1].get_position().x1-ax[1, 0].get_position().x0, 0.03])
+                cax = fig.add_axes([ax[1, 0].get_position().x0, ax[1, 0].get_position().y0-0.09, ax[1, 1].get_position().x1-ax[1, 0].get_position().x0, 0.03])
 
                 #fig.colorbar(mesh_err, ax=ax.ravel().tolist())
-                fig.colorbar(mesh_err, cax=cax_err)
-                fig.colorbar(mesh, cax=cax)
+                #fig_tot.colorbar(mesh_tot, ax=ax_tot.ravel().tolist(), orientation='horizontal', shrink=0.75, fraction=0.05)
+                fig.colorbar(mesh_err, cax=cax_err, orientation='horizontal')
+                fig.colorbar(mesh, cax=cax, orientation='horizontal')
                 
                 fig.savefig(file_name_type, dpi=dpi, bbox_extra_artists=text_boxes + [cax_err, cax], bbox_inches='tight')
                 shutil.copy(str(file_name_type), str(file_name_all))
@@ -1017,7 +1180,7 @@ class ModelComparison(object):
                 plt.close(fig)
     
     
-    def generate_feature_images(self, regenerate=False, idx=None, dpi=None, save_format='png', color_limit=1.75):
+    def generate_feature_images(self, regenerate=False, idx=None, dpi='figure', save_format='png', color_limit=1.75):
         names = ['He I', 'Lim', 'Latitude']
         
         empty_model = empty_model = self.load_empty_model(add_distance_channel=True, add_latitude_channel=True)

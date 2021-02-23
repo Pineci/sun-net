@@ -59,9 +59,9 @@ class InversePowerTransform(object):
         for i in range(sample.shape[stack_axis]):
             if self.lambda_val[i] is not None:
                 if stack_axis == 0:
-                    sample[i, :, :] = np.exp(sample[i, :, :] + self.min_val[i] - 1)
+                    sample[i, :, :] = np.exp(sample[i, :, :]) + self.min_val[i] - 1
                 else:
-                    sample[:, i, :, :] = np.exp(sample[:, i, :, :] + self.min_val[i] - 1)
+                    sample[:, i, :, :] = np.exp(sample[:, i, :, :])  + self.min_val[i] - 1
         
         return sample
             
